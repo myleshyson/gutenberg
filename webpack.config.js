@@ -1,214 +1,80 @@
 /**
  * External dependencies
  */
-const webpack = require( 'webpack' );
-const ExtractTextPlugin = require( 'extract-text-webpack-plugin' );
-const WebpackRTLPlugin = require( 'webpack-rtl-plugin' );
-const { reduce, escapeRegExp, castArray, get } = require( 'lodash' );
-const { basename } = require( 'path' );
-
-// Main CSS loader for everything but blocks..
-const mainCSSExtractTextPlugin = new ExtractTextPlugin( {
-	filename: './[basename]/build/style.css',
-} );
-
-// CSS loader for styles specific to block editing.
-const editBlocksCSSPlugin = new ExtractTextPlugin( {
-	filename: './blocks/build/edit-blocks.css',
-} );
-
-// CSS loader for styles specific to blocks in general.
-const blocksCSSPlugin = new ExtractTextPlugin( {
-	filename: './blocks/build/style.css',
-} );
-
-// Configuration for the ExtractTextPlugin.
-const extractConfig = {
-	use: [
-		{ loader: 'raw-loader' },
-		{
-			loader: 'postcss-loader',
-			options: {
-				plugins: [
-					require( 'autoprefixer' ),
-				],
-			},
-		},
-		{
-			loader: 'sass-loader',
-			query: {
-				includePaths: [ 'edit-post/assets/stylesheets' ],
-				data: '@import "colors"; @import "admin-schemes"; @import "breakpoints"; @import "variables"; @import "mixins"; @import "animations";@import "z-index";',
-				outputStyle: 'production' === process.env.NODE_ENV ?
-					'compressed' : 'nested',
-			},
-		},
-	],
-};
-
-const entryPointNames = [
-	'blocks',
-	'components',
-	'date',
-	'editor',
-	'element',
-	'i18n',
-	'utils',
-	'data',
-	'viewport',
-	[ 'editPost', 'edit-post' ],
-];
-
-const packageNames = [
-	'hooks',
-];
-
-const externals = {
-	react: 'React',
-	'react-dom': 'ReactDOM',
-	'react-dom/server': 'ReactDOMServer',
-	tinymce: 'tinymce',
-	moment: 'moment',
-	jquery: 'jQuery',
-};
-
-[ ...entryPointNames, ...packageNames ].forEach( name => {
-	externals[ `@wordpress/${ name }` ] = {
-		this: [ 'wp', name ],
-	};
-} );
+const { DefinePlugin } = require( 'webpack' );
+const CopyWebpackPlugin = require( 'copy-webpack-plugin' );
+const postcss = require( 'postcss' );
+const { get, escapeRegExp, compact } = require( 'lodash' );
+const { basename, sep } = require( 'path' );
 
 /**
- * Webpack plugin for handling specific template tags in Webpack configuration
- * values like those supported in the base Webpack functionality (e.g. `name`).
- *
- * @see webpack.TemplatedPathPlugin
+ * WordPress dependencies
  */
-class CustomTemplatedPathPlugin {
-	/**
-	 * CustomTemplatedPathPlugin constructor. Initializes handlers as a tuple
-	 * set of RegExp, handler, where the regular expression is used in matching
-	 * a Webpack asset path.
-	 *
-	 * @param {Object.<string,Function>} handlers Object keyed by tag to match,
-	 *                                            with function value returning
-	 *                                            replacement string.
-	 *
-	 * @return {void}
-	 */
-	constructor( handlers ) {
-		this.handlers = reduce( handlers, ( result, handler, key ) => {
-			const regexp = new RegExp( `\\[${ escapeRegExp( key ) }\\]`, 'gi' );
-			return [ ...result, [ regexp, handler ] ];
-		}, [] );
-	}
+const CustomTemplatedPathPlugin = require( '@wordpress/custom-templated-path-webpack-plugin' );
+const LibraryExportDefaultPlugin = require( '@wordpress/library-export-default-webpack-plugin' );
+const DependencyExtractionWebpackPlugin = require( '@wordpress/dependency-extraction-webpack-plugin' );
+const { camelCaseDash } = require( '@wordpress/scripts/utils' );
 
-	/**
-	 * Webpack plugin application logic.
-	 *
-	 * @param {Object} compiler Webpack compiler
-	 *
-	 * @return {void}
-	 */
-	apply( compiler ) {
-		compiler.plugin( 'compilation', ( compilation ) => {
-			compilation.mainTemplate.plugin( 'asset-path', ( path, data ) => {
-				for ( let i = 0; i < this.handlers.length; i++ ) {
-					const [ regexp, handler ] = this.handlers[ i ];
-					if ( regexp.test( path ) ) {
-						return path.replace( regexp, handler( path, data ) );
-					}
-				}
+/**
+ * Internal dependencies
+ */
+const { dependencies } = require( './package' );
 
-				return path;
-			} );
-		} );
-	}
-}
+const {
+	NODE_ENV: mode = 'development',
+	WP_DEVTOOL: devtool = ( mode === 'production' ? false : 'source-map' ),
+} = process.env;
 
-const config = {
-	entry: Object.assign(
-		entryPointNames.reduce( ( memo, entryPoint ) => {
-			// Normalized entry point as an array of [ name, path ]. If a path
-			// is not explicitly defined, use the name.
-			entryPoint = castArray( entryPoint );
-			const [ name, path = name ] = entryPoint;
+const WORDPRESS_NAMESPACE = '@wordpress/';
 
-			memo[ name ] = `./${ path }`;
+const gutenbergPackages = Object.keys( dependencies )
+	.filter( ( packageName ) => packageName.startsWith( WORDPRESS_NAMESPACE ) )
+	.map( ( packageName ) => packageName.replace( WORDPRESS_NAMESPACE, '' ) );
 
-			return memo;
-		}, {} ),
-		packageNames.reduce( ( memo, packageName ) => {
-			memo[ packageName ] = `./node_modules/@wordpress/${ packageName }`;
-			return memo;
-		}, {} )
-	),
+module.exports = {
+	mode,
+	entry: gutenbergPackages.reduce( ( memo, packageName ) => {
+		const name = camelCaseDash( packageName );
+		memo[ name ] = `./packages/${ packageName }`;
+		return memo;
+	}, {} ),
 	output: {
-		filename: '[basename]/build/index.js',
+		filename: './build/[basename]/index.js',
 		path: __dirname,
 		library: [ 'wp', '[name]' ],
 		libraryTarget: 'this',
 	},
-	externals,
-	resolve: {
-		modules: [
-			__dirname,
-			'node_modules',
-		],
-	},
 	module: {
-		rules: [
-			{
-				test: /\.pegjs/,
-				use: 'pegjs-loader',
-			},
-			{
+		rules: compact( [
+			mode !== 'production' && {
 				test: /\.js$/,
-				exclude: /node_modules/,
-				use: 'babel-loader',
+				use: require.resolve( 'source-map-loader' ),
+				enforce: 'pre',
 			},
-			{
-				test: /style\.s?css$/,
-				include: [
-					/blocks/,
-				],
-				use: blocksCSSPlugin.extract( extractConfig ),
-			},
-			{
-				test: /editor\.s?css$/,
-				include: [
-					/blocks/,
-				],
-				use: editBlocksCSSPlugin.extract( extractConfig ),
-			},
-			{
-				test: /\.s?css$/,
-				exclude: [
-					/blocks/,
-				],
-				use: mainCSSExtractTextPlugin.extract( extractConfig ),
-			},
-		],
+		] ),
 	},
 	plugins: [
-		new webpack.DefinePlugin( {
-			'process.env.NODE_ENV': JSON.stringify( process.env.NODE_ENV || 'development' ),
-		} ),
-		blocksCSSPlugin,
-		editBlocksCSSPlugin,
-		mainCSSExtractTextPlugin,
-		// Create RTL files with a -rtl suffix
-		new WebpackRTLPlugin( {
-			suffix: '-rtl',
-			minify: process.env.NODE_ENV === 'production' ? { safe: true } : false,
-		} ),
-		new webpack.LoaderOptionsPlugin( {
-			minimize: process.env.NODE_ENV === 'production',
-			debug: process.env.NODE_ENV !== 'production',
+		new DefinePlugin( {
+			// Inject the `GUTENBERG_PHASE` global, used for feature flagging.
+			// eslint-disable-next-line @wordpress/gutenberg-phase
+			'process.env.GUTENBERG_PHASE': JSON.stringify( parseInt( process.env.npm_package_config_GUTENBERG_PHASE, 10 ) || 1 ),
+			'process.env.FORCE_REDUCED_MOTION': JSON.stringify( process.env.FORCE_REDUCED_MOTION ),
 		} ),
 		new CustomTemplatedPathPlugin( {
 			basename( path, data ) {
-				const rawRequest = get( data, [ 'chunk', 'entryModule', 'rawRequest' ] );
+				let rawRequest;
+
+				const entryModule = get( data, [ 'chunk', 'entryModule' ], {} );
+				switch ( entryModule.type ) {
+					case 'javascript/auto':
+						rawRequest = entryModule.rawRequest;
+						break;
+
+					case 'javascript/esm':
+						rawRequest = entryModule.rootModule.rawRequest;
+						break;
+				}
+
 				if ( rawRequest ) {
 					return basename( rawRequest );
 				}
@@ -216,19 +82,74 @@ const config = {
 				return path;
 			},
 		} ),
+		new LibraryExportDefaultPlugin( [
+			'api-fetch',
+			'deprecated',
+			'dom-ready',
+			'redux-routine',
+			'token-list',
+			'server-side-render',
+			'shortcode',
+		].map( camelCaseDash ) ),
+		new CopyWebpackPlugin(
+			gutenbergPackages.map( ( packageName ) => ( {
+				from: `./packages/${ packageName }/build-style/*.css`,
+				to: `./build/${ packageName }/`,
+				flatten: true,
+				transform: ( content ) => {
+					if ( mode === 'production' ) {
+						return postcss( [
+							require( 'cssnano' )( {
+								preset: [ 'default', {
+									discardComments: {
+										removeAll: true,
+									},
+								} ],
+							} ),
+						] )
+							.process( content, { from: 'src/app.css', to: 'dest/app.css' } )
+							.then( ( result ) => result.css );
+					}
+					return content;
+				},
+			} ) )
+		),
+		new CopyWebpackPlugin( [
+			{
+				from: './packages/block-library/src/**/index.php',
+				test: new RegExp( `([\\w-]+)${ escapeRegExp( sep ) }index\\.php$` ),
+				to: 'build/block-library/blocks/[1].php',
+				transform( content ) {
+					content = content.toString();
+
+					// Within content, search for any function definitions. For
+					// each, replace every other reference to it in the file.
+					return content
+						.match( /^function [^\(]+/gm )
+						.reduce( ( result, functionName ) => {
+							// Trim leading "function " prefix from match.
+							functionName = functionName.slice( 9 );
+
+							// Prepend the Gutenberg prefix, substituting any
+							// other core prefix (e.g. "wp_").
+							return result.replace(
+								new RegExp( functionName, 'g' ),
+								( match ) => 'gutenberg_' + match.replace( /^wp_/, '' )
+							);
+						}, content )
+						// The core blocks override procedure takes place in
+						// the init action default priority to ensure that core
+						// blocks would have been registered already. Since the
+						// blocks implementations occur at the default priority
+						// and due to WordPress hooks behavior not considering
+						// mutations to the same priority during another's
+						// callback, the Gutenberg build blocks are modified
+						// to occur at a later priority.
+						.replace( /(add_action\(\s*'init',\s*'gutenberg_register_block_[^']+'(?!,))/, '$1, 20' );
+				},
+			},
+		] ),
+		new DependencyExtractionWebpackPlugin( { injectPolyfill: true } ),
 	],
-	stats: {
-		children: false,
-	},
+	devtool,
 };
-
-switch ( process.env.NODE_ENV ) {
-	case 'production':
-		config.plugins.push( new webpack.optimize.UglifyJsPlugin() );
-		break;
-
-	default:
-		config.devtool = 'source-map';
-}
-
-module.exports = config;
